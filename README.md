@@ -1,4 +1,4 @@
-# 🔍 DGMS Notification Scraper - Enhanced Version
+# 🔍 DGMS Notification Scraper 
 
 ## 📋 Overview
 
