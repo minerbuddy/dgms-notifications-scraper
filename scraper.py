@@ -4,6 +4,7 @@ import json
 import urllib3
 from datetime import datetime
 import re
+import os
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -38,18 +39,28 @@ def scrape_dgms():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
+    # 1. Purana data load karo taaki history safe rahe
+    existing_data = []
+    if os.path.exists('notification.json'):
+        with open('notification.json', 'r', encoding='utf-8') as f:
+            try:
+                existing_data = json.load(f)
+            except json.JSONDecodeError:
+                existing_data = []
+                
+    # 2. Purane titles ka set bana lo match karne ke liye
+    existing_titles = {item['title'] for item in existing_data if 'title' in item}
+    new_items_added = 0
+    
     try:
         response = requests.get(url, headers=headers, verify=False, timeout=20)
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
-            notification_list = []
             
-            # CRITICAL FIX: Find the specific form that contains the notification list
             form_tag = soup.find('form', action="/UserView")
             
             if form_tag:
-                # Find all list items ONLY inside that specific form
                 items = form_tag.find_all('li')
                 
                 for item in items:
@@ -57,57 +68,53 @@ def scrape_dgms():
                     
                     if link_tag:
                         title = item.get_text(separator=" ", strip=True)
-                        
-                        # Clean title: Remove "(530 KB)" type text
                         clean_title = re.sub(r'\s*\(\s*\d+\.?\d*\s*[KMG]B\s*\).*', '', title).strip()
-                        
                         href = link_tag['href']
                         full_url = href if href.startswith('http') else f"https://www.dgms.gov.in{href}"
                         
                         if clean_title and len(clean_title) > 5:
-                            published_date = extract_date_from_text(title)
-                            priority = classify_priority(clean_title)
-                            scraped_at = datetime.now().isoformat()
                             
-                            notification_item = {
-                                "title": clean_title,
-                                "link": full_url,
-                                "published_date": published_date,
-                                "scraped_at": scraped_at,
-                                "priority": priority,
-                                "file_type": "PDF" if ".pdf" in full_url.lower() else "Link"
-                            }
-                            
-                            notification_list.append(notification_item)
+                            # 3. Yahan check hoga ki NAYA notification hai ya nahi
+                            if clean_title not in existing_titles:
+                                published_date = extract_date_from_text(title)
+                                priority = classify_priority(clean_title)
+                                scraped_at = datetime.now().isoformat()
+                                
+                                notification_item = {
+                                    "title": clean_title,
+                                    "link": full_url,
+                                    "published_date": published_date,
+                                    "scraped_at": scraped_at,
+                                    "priority": priority,
+                                    "file_type": "PDF" if ".pdf" in full_url.lower() else "Link"
+                                }
+                                
+                                existing_data.append(notification_item)
+                                existing_titles.add(clean_title)
+                                new_items_added += 1
             
-            if notification_list:
-                seen = set()
-                final_notifications = []
-                
-                for n in notification_list:
-                    key = (n['title'], n['link'])
-                    if key not in seen:
-                        final_notifications.append(n)
-                        seen.add(key)
-                
+            # 4. Agar naye items mile hain, tabhi file save karo
+            if new_items_added > 0:
                 priority_order = {'high': 0, 'medium': 1, 'low': 2}
-                final_notifications.sort(key=lambda x: (
-                    priority_order.get(x['priority'], 3),
-                    x['published_date'] or '0000-00-00'
+                
+                # Priority aur Date dono ke hisaab se sort karo
+                existing_data.sort(key=lambda x: (
+                    priority_order.get(x.get('priority', 'low'), 3),
+                    x.get('published_date') or '0000-00-00'
                 ), reverse=True)
                 
                 with open('notification.json', 'w', encoding='utf-8') as f:
-                    json.dump(final_notifications, f, indent=4, ensure_ascii=False)
+                    json.dump(existing_data, f, indent=4, ensure_ascii=False)
                     
-                # Hata dena ya rakhna aapki marzi hai local testing ke liye
-                # print(f"✅ Success! Found {len(final_notifications)} notifications.")
+                print(f"✅ Success! Naye {new_items_added} notifications add kiye gaye.")
             else:
-                raise Exception("No notifications found inside the <form action='/UserView'> tag.")
+                print("📭 Koi naya notification nahi mila. File update nahi hui.")
                 
         else:
             raise Exception(f"HTTP Request failed with status code: {response.status_code}")
             
     except Exception as e:
+        print(f"❌ Error: {e}")
         raise e
 
 if __name__ == "__main__":
