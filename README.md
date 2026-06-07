@@ -270,7 +270,7 @@ last_24h = [x for x in data if
 ### 3. **Dashboard Integration**
 ```python
 # Web dashboard par display karo
-json_url = "https://raw.githubusercontent.com/minerbuddy/dgms-news-scraper/main/news.json"
+json_url = "https://raw.githubusercontent.com/minerbuddy/dgms-notifications-scraper/main/notification.json"
 # Fetch karo aur visualize karo
 ```
 
