@@ -1,160 +1,121 @@
-"""
-DGMS Connectivity Debug Script
-================================
-Run this in GitHub Actions / Render / wherever your scraper runs.
-It does NOT scrape notifications — it only diagnoses WHY the connection fails.
-
-It runs 4 tests and prints a clear verdict at the end:
-  1. Plain requests.get() to DGMS (what your current scraper does)
-  2. requests.get() to a known-good control site (httpbin) — proves network works at all
-  3. DNS resolution check for dgms.gov.in
-  4. Playwright headless browser load of DGMS (real browser fingerprint)
-
-Install deps before running:
-    pip install requests playwright --break-system-packages
-    playwright install chromium --with-deps
-
-Run:
-    python debug_dgms.py
-"""
-
-import socket
-import time
+import requests
+from bs4 import BeautifulSoup
 import json
+import urllib3
+from datetime import datetime
+import re
+import os
 
-RESULTS = {}
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-DGMS_URL = "https://www.dgms.gov.in/UserView/index?mid=1603"
-CONTROL_URL = "https://httpbin.org/get"
+def extract_date_from_text(text):
+    date_patterns = [
+        r'\d{1,2}-\d{1,2}-\d{4}',  
+        r'\d{1,2}/\d{1,2}/\d{4}',  
+        r'\d{1,2}\.\d{1,2}\.\d{4}',  
+    ]
+    for pattern in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group(0)
+    return None
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Connection": "keep-alive",
-}
+def classify_priority(title):
+    title_lower = title.lower()
+    high_priority_keywords = ['exam', 'examination', 'oral', 'interview', 'result', 'final', 'manager', 'sirdar', 'foreman', 'overman', 'surveyor']
+    medium_priority_keywords = ['notification', 'schedule', 'instruction', 'provisional', 'call', 'declared', 'list', 'slot', 'booking', 'verification']
+    
+    for keyword in high_priority_keywords:
+        if keyword in title_lower:
+            return 'high'
+    for keyword in medium_priority_keywords:
+        if keyword in title_lower:
+            return 'medium'
+    return 'low'
 
-
-def log(section, msg):
-    print(f"\n[{section}] {msg}")
-
-
-def test_dns():
-    log("DNS", "Resolving www.dgms.gov.in ...")
-    try:
-        ip = socket.gethostbyname("www.dgms.gov.in")
-        log("DNS", f"Resolved to {ip}")
-        RESULTS["dns"] = {"ok": True, "ip": ip}
-    except Exception as e:
-        log("DNS", f"FAILED: {e}")
-        RESULTS["dns"] = {"ok": False, "error": str(e)}
-
-
-def test_control_site():
-    log("CONTROL", f"GET {CONTROL_URL} (sanity check that outbound HTTPS works at all)")
-    import requests
-    try:
-        start = time.time()
-        r = requests.get(CONTROL_URL, headers=HEADERS, timeout=15)
-        elapsed = time.time() - start
-        log("CONTROL", f"Status={r.status_code} Time={elapsed:.2f}s")
-        RESULTS["control"] = {"ok": True, "status": r.status_code, "time": elapsed}
-    except Exception as e:
-        log("CONTROL", f"FAILED: {e}")
-        RESULTS["control"] = {"ok": False, "error": str(e)}
-
-
-def test_plain_requests():
-    log("REQUESTS", f"GET {DGMS_URL} with browser headers, timeout=(10,30)")
-    import requests
-    try:
-        start = time.time()
-        r = requests.get(DGMS_URL, headers=HEADERS, verify=False, timeout=(10, 30))
-        elapsed = time.time() - start
-        log("REQUESTS", f"Status={r.status_code} Time={elapsed:.2f}s Bytes={len(r.content)}")
-        log("REQUESTS", f"First 200 chars: {r.text[:200]!r}")
-        RESULTS["plain_requests"] = {"ok": True, "status": r.status_code, "time": elapsed}
-    except Exception as e:
-        log("REQUESTS", f"FAILED: {type(e).__name__}: {e}")
-        RESULTS["plain_requests"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
-def test_playwright():
-    log("PLAYWRIGHT", f"Launching headless Chromium -> {DGMS_URL}")
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        log("PLAYWRIGHT", "SKIPPED - playwright not installed (pip install playwright && playwright install chromium)")
-        RESULTS["playwright"] = {"ok": False, "error": "not installed"}
-        return
-
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            start = time.time()
+def scrape_dgms():
+    url = "https://www.dgms.gov.in/UserView/index?mid=1603"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    
+    # 1. Purana data load karo taaki history safe rahe
+    existing_data = []
+    if os.path.exists('notification.json'):
+        with open('notification.json', 'r', encoding='utf-8') as f:
             try:
-                response = page.goto(DGMS_URL, timeout=30000, wait_until="domcontentloaded")
-                elapsed = time.time() - start
-                status = response.status if response else None
-                content_len = len(page.content())
-                log("PLAYWRIGHT", f"Status={status} Time={elapsed:.2f}s ContentLen={content_len}")
-                RESULTS["playwright"] = {"ok": True, "status": status, "time": elapsed}
-            except Exception as e:
-                elapsed = time.time() - start
-                log("PLAYWRIGHT", f"FAILED after {elapsed:.2f}s: {type(e).__name__}: {e}")
-                RESULTS["playwright"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-            finally:
-                browser.close()
+                existing_data = json.load(f)
+            except json.JSONDecodeError:
+                existing_data = []
+                
+    # 2. Purane titles ka set bana lo match karne ke liye
+    existing_titles = {item['title'] for item in existing_data if 'title' in item}
+    new_items_added = 0
+    
+    try:
+        response = requests.get(url, headers=headers, verify=False, timeout=20)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            form_tag = soup.find('form', action="/UserView")
+            
+            if form_tag:
+                items = form_tag.find_all('li')
+                
+                for item in items:
+                    link_tag = item.find('a', href=True)
+                    
+                    if link_tag:
+                        title = item.get_text(separator=" ", strip=True)
+                        clean_title = re.sub(r'\s*\(\s*\d+\.?\d*\s*[KMG]B\s*\).*', '', title).strip()
+                        href = link_tag['href']
+                        full_url = href if href.startswith('http') else f"https://www.dgms.gov.in{href}"
+                        
+                        if clean_title and len(clean_title) > 5:
+                            
+                            # 3. Yahan check hoga ki NAYA notification hai ya nahi
+                            if clean_title not in existing_titles:
+                                published_date = extract_date_from_text(title)
+                                priority = classify_priority(clean_title)
+                                scraped_at = datetime.now().isoformat()
+                                
+                                notification_item = {
+                                    "title": clean_title,
+                                    "link": full_url,
+                                    "published_date": published_date,
+                                    "scraped_at": scraped_at,
+                                    "priority": priority,
+                                    "file_type": "PDF" if ".pdf" in full_url.lower() else "Link"
+                                }
+                                
+                                existing_data.append(notification_item)
+                                existing_titles.add(clean_title)
+                                new_items_added += 1
+            
+            # 4. Agar naye items mile hain, tabhi file save karo
+            if new_items_added > 0:
+                priority_order = {'high': 0, 'medium': 1, 'low': 2}
+                
+                # Priority aur Date dono ke hisaab se sort karo
+                existing_data.sort(key=lambda x: (
+                    priority_order.get(x.get('priority', 'low'), 3),
+                    x.get('published_date') or '0000-00-00'
+                ), reverse=True)
+                
+                with open('notification.json', 'w', encoding='utf-8') as f:
+                    json.dump(existing_data, f, indent=4, ensure_ascii=False)
+                    
+                print(f"âœ… Success! Naye {new_items_added} notifications add kiye gaye.")
+            else:
+                print("ðŸ“­ Koi naya notification nahi mila. File update nahi hui.")
+                
+        else:
+            raise Exception(f"HTTP Request failed with status code: {response.status_code}")
+            
     except Exception as e:
-        log("PLAYWRIGHT", f"Setup FAILED: {type(e).__name__}: {e}")
-        RESULTS["playwright"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
-def verdict():
-    print("\n" + "=" * 60)
-    print("VERDICT")
-    print("=" * 60)
-
-    dns_ok = RESULTS.get("dns", {}).get("ok")
-    control_ok = RESULTS.get("control", {}).get("ok")
-    plain_ok = RESULTS.get("plain_requests", {}).get("ok")
-    pw_ok = RESULTS.get("playwright", {}).get("ok")
-
-    if not control_ok:
-        print("-> Outbound internet/HTTPS itself is broken in this environment.")
-        print("   This is NOT a DGMS-specific issue. Check runner network config.")
-    elif not dns_ok:
-        print("-> DNS resolution for dgms.gov.in is failing from this environment.")
-        print("   Possible DNS-level blocking or runner DNS misconfiguration.")
-    elif plain_ok and pw_ok:
-        print("-> Both plain requests AND Playwright succeeded.")
-        print("   The earlier failures were likely transient (site instability) or")
-        print("   the headers/retry fix already solved it. Re-run a few times to confirm.")
-    elif (not plain_ok) and pw_ok:
-        print("-> Plain requests FAILS but Playwright SUCCEEDS.")
-        print("   Strong signal: bot/fingerprint-based filtering, not a full IP ban.")
-        print("   DGMS is likely allowing real-browser TLS/JS fingerprints and")
-        print("   rejecting/dropping simple HTTP client connections.")
-        print("   -> Recommended fix: move scraping to Playwright.")
-    elif (not plain_ok) and (not pw_ok):
-        print("-> BOTH plain requests AND Playwright FAIL from this environment,")
-        print("   while the control site (httpbin) works fine.")
-        print("   Strong signal: this specific IP/range is blocked at the network")
-        print("   level for dgms.gov.in (TCP handshake never completes for ANY client).")
-        print("   -> Recommended fix: run from a non-datacenter IP (residential proxy,")
-        print("      mobile/ISP connection, or a self-hosted runner on a home/VPS")
-        print("      machine with a residential-ish IP). Playwright alone will NOT help.")
-    else:
-        print("-> Inconclusive — re-run and check raw results below.")
-
-    print("\nRaw results:")
-    print(json.dumps(RESULTS, indent=2, default=str))
-
+        print(f"âŒ Error: {e}")
+        raise e
 
 if __name__ == "__main__":
-    test_dns()
-    test_control_site()
-    test_plain_requests()
-    test_playwright()
-    verdict()
+    scrape_dgms()
