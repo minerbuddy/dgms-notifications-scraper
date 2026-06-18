@@ -1,0 +1,24 @@
+name: DGMS Connectivity Debug
+
+on:
+  workflow_dispatch:   # Manual trigger from the Actions tab â€” click "Run workflow"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests playwright --break-system-packages
+          playwright install chromium --with-deps
+
+      - name: Run DGMS diagnostic
+        run: python debug_dgms.py
